@@ -3,6 +3,7 @@ import random
 import time
 import mediapipe as mp
 import numpy as np
+from AppKit import NSScreen
 
 # Initialize mediapipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
@@ -15,6 +16,16 @@ if not cap.isOpened():
     exit()
 
 print("Press 'q' to quit.")
+
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+screen = NSScreen.mainScreen().frame()
+screen_width = int(screen.size.width)
+screen_height = int(screen.size.height)
+
+cv2.namedWindow("Ball Game", cv2.WINDOW_NORMAL)
+cv2.setWindowProperty("Ball Game", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
 # Initialize mediapipe face mesh detector
 face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.5, min_tracking_confidence=0.5)
@@ -37,7 +48,7 @@ start_time = time.time()  # Track game start time
 # Screen dimensions (to avoid edge drops)
 frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-safe_margin = ball_radius + 30  # Avoid edges for ball spawning
+safe_margin = ball_radius + 50  # Avoid edges for ball spawning
 
 # Class to represent the falling balls
 class Ball:
@@ -49,48 +60,134 @@ class Ball:
     def update_position(self):
         self.y += self.speed  # Move the ball down
 
+# --- Replace your draw_text_block() with this improved UI version ---
+def draw_text_block(frame, text_lines, center_y):
+    """
+    Draws a centered instructional text box with smooth UI spacing.
+    text_lines = [("text", scale), ...]
+    """
+    padding_x = 50
+    padding_y = 20
+    line_spacing = 12
+
+    # Measure text block size
+    widths = []
+    heights = []
+    for text, scale in text_lines:
+        (w, h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, scale, 2)
+        widths.append(w)
+        heights.append(h)
+
+    block_width = max(widths) + padding_x * 2
+    block_height = sum(heights) + padding_y * 2 + line_spacing * (len(text_lines) - 1)
+
+    # Center block
+    x1 = frame_width // 2 - block_width // 2
+    y1 = center_y - block_height // 2
+    x2 = x1 + block_width
+    y2 = y1 + block_height
+
+    # Draw background (semi-transparent black)
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 0), -1)
+    frame = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
+
+    # Draw text lines centered
+    y = y1 + padding_y
+    for (text, scale), h in zip(text_lines, heights):
+        (w, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, scale, 2)
+        x = frame_width // 2 - w // 2
+        cv2.putText(frame, text, (x, y + h), cv2.FONT_HERSHEY_DUPLEX, scale, (255, 255, 255), 2)
+        y += h + line_spacing
+
+    return frame
+
+
+# --- Replace your show_waiting_screen() entirely with this ---
 def show_waiting_screen():
-    """Show waiting screen with instructions to start the game"""
-    frame = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
-    cv2.putText(frame, "Press Enter to Start", (frame_width // 3, frame_height // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.imshow("Ball Game", frame)
-    key = cv2.waitKey(0) & 0xFF  # Wait for key press (Enter or q)
-    return key
+    """Show camera feed + live mouth hitbox + instruction UI"""
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        frame = cv2.flip(frame, 1)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb_frame)
+
+        # Live mouth hitbox preview
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                pts = [
+                    face_landmarks.landmark[2],
+                    face_landmarks.landmark[152],
+                    face_landmarks.landmark[234],
+                    face_landmarks.landmark[454]
+                ]
+
+                face_width = abs(pts[2].x - pts[3].x) * frame_width
+                face_height = abs(pts[1].y - pts[0].y) * frame_height
+                square_size = int(max(face_width, face_height) * 0.6)
+
+                top_y = int(pts[0].y * frame_height - square_size / 7)
+                bottom_y = int(pts[1].y * frame_height - square_size / 7)
+                min_x = int(min(p.x for p in pts) * frame_width)
+                max_x = int(max(p.x for p in pts) * frame_width)
+
+                top_y = max(0, top_y)
+                bottom_y = min(frame_height, bottom_y)
+                min_x = max(safe_margin, min_x)
+                max_x = min(frame_width - safe_margin, max_x)
+
+                cv2.rectangle(frame, (min_x, top_y), (max_x, bottom_y), (0, 255, 0), 2)
+
+        # Draw UI text
+        frame = draw_text_block(frame, [
+            ("Align your mouth box & move your head to control!", 0.9),
+            ("Press ENTER to Start", 1.2),
+            ("Press Q to Quit", 1.0),
+        ], frame_height // 4)
+
+        # Scale to full screen size
+        frame = cv2.resize(frame, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
+        cv2.imshow("Ball Game", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord('q'):
+            return ord('q')
+        if key == 13:
+            return 13
+
+
 
 def show_game_over_screen():
-    """Show the game over screen with the score and instructions"""
-    frame = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
+    """Show camera feed with score and retry options"""
+    global best_score
 
-    # Centered text for Game Over
-    text = f"Game Over! Your score was: {score}"
-    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.5, 2)[0]
-    text_x = (frame_width - text_size[0]) // 2
-    text_y = frame_height // 3
-    cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2, cv2.LINE_AA)
+    while True:
+        ret, frame = cap.read()
+        if not ret: continue
+        frame = cv2.flip(frame, 1)
 
-    # Centered text for Best Score
-    best_score_text = f"Best Score: {best_score}"
-    best_score_size = cv2.getTextSize(best_score_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
-    best_score_x = (frame_width - best_score_size[0]) // 2
-    best_score_y = text_y + 50
-    cv2.putText(frame, best_score_text, (best_score_x, best_score_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+        frame = draw_text_block(frame, [
+            (f"GAME OVER!", 1.4),
+            (f"Your Score: {score}", 1.2),
+            (f"Best Score: {best_score}", 1.2),
+            ("Press ENTER to Retry", 1.0),
+            ("Press Q to Quit", 1.0),
+        ], frame_height // 4)
 
-    # Centered text for Retry and Quit options
-    retry_text = "Press Enter to Retry"
-    retry_size = cv2.getTextSize(retry_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
-    retry_x = (frame_width - retry_size[0]) // 2
-    retry_y = best_score_y + 50
-    cv2.putText(frame, retry_text, (retry_x, retry_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+        # Scale to full screen size
+        frame = cv2.resize(frame, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
+        cv2.imshow("Ball Game", frame)
 
-    quit_text = "Press 'q' to Quit"
-    quit_size = cv2.getTextSize(quit_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
-    quit_x = (frame_width - quit_size[0]) // 2
-    quit_y = retry_y + 50
-    cv2.putText(frame, quit_text, (quit_x, quit_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+        key = cv2.waitKey(1) & 0xFF
 
-    cv2.imshow("Ball Game", frame)
-    key = cv2.waitKey(0) & 0xFF  # Wait for key press (Enter or q)
-    return key
+        if key == ord('q'):
+            return ord('q')
+        if key == 13:  # Enter
+            return 13
 
 # Main game loop
 while True:
@@ -101,7 +198,7 @@ while True:
         break  # Exit if 'q' is pressed
 
     # Reset game state
-    lives = 3
+    lives = 1
     score = 0
     balls.clear()
     start_time = time.time()
@@ -205,7 +302,10 @@ while True:
         cv2.putText(frame, f"Lives: {lives}", (frame_width - 150, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
         # Show the frame
+        # Scale to full screen size
+        frame = cv2.resize(frame, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
         cv2.imshow("Ball Game", frame)
+
 
         # Exit condition
         if cv2.waitKey(1) & 0xFF == ord('q'):
